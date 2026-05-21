@@ -176,6 +176,25 @@ const COUNTRIES = [
   { name: "Yemen", code: "ye", lat: 15.55, lng: 48.52 },
   { name: "Zambia", code: "zm", lat: -13.13, lng: 27.85 },
   { name: "Zimbabwe", code: "zw", lat: -19.02, lng: 29.15 },
+  { name: "Stati Uniti", code: "us", lat: 37.09, lng: -95.71 },
+  { name: "Eswatini", code: "sz", lat: -26.52, lng: 31.47 },
+  { name: "Seychelles", code: "sc", lat: -4.68, lng: 55.49 },
+  { name: "São Tomé e Príncipe", code: "st", lat: 0.19, lng: 6.61 },
+  { name: "Nauru", code: "nr", lat: -0.52, lng: 166.93 },
+  { name: "Tuvalu", code: "tv", lat: -7.11, lng: 177.65 },
+  { name: "Samoa", code: "ws", lat: -13.76, lng: -172.10 },
+  { name: "Tonga", code: "to", lat: -21.18, lng: -175.20 },
+  { name: "Isole Salomone", code: "sb", lat: -9.65, lng: 160.16 },
+  { name: "Micronesia", code: "fm", lat: 7.43, lng: 150.55 },
+  { name: "Isole Marshall", code: "mh", lat: 7.13, lng: 171.18 },
+  { name: "Antigua e Barbuda", code: "ag", lat: 17.06, lng: -61.80 },
+  { name: "Dominica", code: "dm", lat: 15.41, lng: -61.37 },
+  { name: "Grenada", code: "gd", lat: 12.11, lng: -61.68 },
+  { name: "Saint Kitts e Nevis", code: "kn", lat: 17.36, lng: -62.78 },
+  { name: "Saint Lucia", code: "lc", lat: 13.91, lng: -60.98 },
+  { name: "Saint Vincent e Grenadine", code: "vc", lat: 12.98, lng: -61.29 },
+  { name: "Barbados", code: "bb", lat: 13.19, lng: -59.54 },
 ]
 
 export default COUNTRIES
+// Aggiunta: paesi mancanti

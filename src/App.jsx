@@ -36,21 +36,11 @@ function getArchiveDates() {
 
 // ── pixel logic ───────────────────────────────────────────────────────────────
 
-// Decodifica base64 → Uint8Array
-function b64(s) {
-  const bin = atob(s), arr = new Uint8Array(bin.length)
-  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i)
-  return arr
-}
-
-// Calcola la maschera di pixel visibili: un pixel è visibile se
-// il suo bucket colore nella bandiera TARGET coincide con il bucket
-// dello stesso pixel nella bandiera GUESS
+// Overlap posizionale: pixel visibile se stesso bucket colore nella stessa posizione
 function computeOverlapMask(targetCode, guessCode) {
-  const td = FLAG_PIXELS[targetCode]
-  const gd = FLAG_PIXELS[guessCode]
-  if (!td || !gd) return new Uint8Array(PW*PH)
-  const tb = td.b, gb = gd.b
+  const tb = FLAG_PIXELS[targetCode]
+  const gb = FLAG_PIXELS[guessCode]
+  if (!tb || !gb) return new Uint8Array(PW*PH)
   const mask = new Uint8Array(PW*PH)
   for (let i=0;i<PW*PH;i++) {
     if (tb[i]==='T'||gb[i]==='T') continue
@@ -59,58 +49,132 @@ function computeOverlapMask(targetCode, guessCode) {
   return mask
 }
 
-// Unione delle maschere di tutti i tentativi
 function computeRevealMask(targetCode, guesses) {
-  const size = PW*PH
-  const mask = new Uint8Array(size)
+  const mask = new Uint8Array(PW*PH)
   guesses.forEach(g => {
     const m = computeOverlapMask(targetCode, g.code)
-    for (let i=0;i<size;i++) if (m[i]) mask[i]=1
+    for (let i=0;i<mask.length;i++) if (m[i]) mask[i]=1
   })
   return mask
 }
 
-// Conta pixel rivelati vs totali non-trasparenti
 function countRevealed(targetCode, mask) {
-  const td = FLAG_PIXELS[targetCode]
-  if (!td) return {revealed:0, total:1}
+  const tb = FLAG_PIXELS[targetCode]
+  if (!tb) return {revealed:0,total:1}
   let revealed=0, total=0
-  const tb = td.b
   for (let i=0;i<tb.length;i++) {
     if (tb[i]==='T') continue
     total++
     if (mask[i]) revealed++
   }
-  return {revealed, total}
+  return {revealed,total}
 }
 
-// ── canvas drawing ────────────────────────────────────────────────────────────
+// ── canvas: rendering nitido con SVG reale + maschera ─────────────────────────
 
-function drawFlag(canvas, targetCode, mask, isDark) {
-  if (!canvas) return
-  const ctx = canvas.getContext('2d')
-  const fd = FLAG_PIXELS[targetCode]
-  if (!fd) return
-  const cw=canvas.width, ch=canvas.height
-  const scaleX=cw/PW, scaleY=ch/PH
-  ctx.clearRect(0,0,cw,ch)
-  ctx.fillStyle = isDark ? '#1a1a1a' : '#d0d0d0'
-  ctx.fillRect(0,0,cw,ch)
-  const rgb = b64(fd.p)
-  for (let y=0;y<PH;y++) {
-    for (let x=0;x<PW;x++) {
-      const i=y*PW+x
-      if (!mask[i]) continue
-      const r=rgb[i*3],g=rgb[i*3+1],b=rgb[i*3+2]
-      ctx.fillStyle=`rgb(${r},${g},${b})`
-      ctx.fillRect(Math.floor(x*scaleX),Math.floor(y*scaleY),Math.ceil(scaleX),Math.ceil(scaleY))
+// Carica immagine SVG reale da flag-icons CDN come Image element
+const imgCache = {}
+function loadFlagImage(code) {
+  if (imgCache[code]) return imgCache[code]
+  const p = new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = `https://cdn.jsdelivr.net/npm/flag-icons@7.2.3/flags/4x3/${code}.svg`
+  })
+  imgCache[code] = p
+  return p
+}
+
+function FlagCanvas({ targetCode, mask, isDark, done, width=300, height=200 }) {
+  const canvasRef = useRef(null)
+  const offscreenRef = useRef(null) // canvas offscreen per la bandiera reale
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const tb = FLAG_PIXELS[targetCode]
+    if (!tb) return
+
+    // Sfondo
+    ctx.fillStyle = isDark ? '#1a1a1a' : '#cccccc'
+    ctx.fillRect(0, 0, width, height)
+
+    if (done) {
+      // Mostra bandiera reale intera
+      loadFlagImage(targetCode).then(img => {
+        ctx.drawImage(img, 0, 0, width, height)
+      }).catch(() => {})
+      return
     }
-  }
+
+    // Disegna bandiera reale in offscreen canvas, poi applica maschera pixel per pixel
+    loadFlagImage(targetCode).then(img => {
+      // Offscreen a risoluzione bucket
+      if (!offscreenRef.current) {
+        offscreenRef.current = document.createElement('canvas')
+        offscreenRef.current.width = PW
+        offscreenRef.current.height = PH
+      }
+      const oCtx = offscreenRef.current.getContext('2d')
+      oCtx.drawImage(img, 0, 0, PW, PH)
+      const imageData = oCtx.getImageData(0, 0, PW, PH)
+      const data = imageData.data
+
+      // Crea imageData per il canvas principale a risoluzione piena
+      const outData = ctx.createImageData(width, height)
+      const out = outData.data
+
+      const scaleX = PW / width
+      const scaleY = PH / height
+
+      for (let y=0; y<height; y++) {
+        for (let x=0; x<width; x++) {
+          // Pixel corrispondente nei bucket
+          const bx = Math.min(Math.floor(x * scaleX), PW-1)
+          const by = Math.min(Math.floor(y * scaleY), PH-1)
+          const bi = by * PW + bx
+          const oi = (y * width + x) * 4
+
+          if (mask[bi]) {
+            // Pixel rivelato: colore reale dalla SVG
+            const si = bi * 4
+            out[oi]   = data[si]
+            out[oi+1] = data[si+1]
+            out[oi+2] = data[si+2]
+            out[oi+3] = 255
+          } else {
+            // Pixel nascosto: sfondo
+            const bg = isDark ? 26 : 204
+            out[oi] = bg; out[oi+1] = bg; out[oi+2] = bg; out[oi+3] = 255
+          }
+        }
+      }
+      ctx.putImageData(outData, 0, 0)
+    }).catch(() => {})
+
+  }, [targetCode, mask, isDark, done, width, height])
+
+  const {revealed, total} = countRevealed(targetCode, mask)
+  const pct = done ? 100 : Math.round(revealed/total*100)
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+      <canvas ref={canvasRef} width={width} height={height}
+        style={{borderRadius:6,border:`2px solid rgba(128,128,128,0.3)`,display:'block',width:width,height:height}}/>
+      <div style={{width,height:3,background:'rgba(128,128,128,0.2)',borderRadius:2,overflow:'hidden'}}>
+        <div style={{height:'100%',width:`${pct}%`,background:'#538d4e',transition:'width 0.4s',borderRadius:2}}/>
+      </div>
+      <div style={{fontSize:10,color:'rgba(128,128,128,0.6)'}}>{pct}% rivelato</div>
+    </div>
+  )
 }
 
 // ── storage ───────────────────────────────────────────────────────────────────
 
-const STORAGE_PREFIX = 'flagle4_'
+const STORAGE_PREFIX = 'flagle5_'
 const THEME_KEY = 'flagle_theme'
 const MAX_ATTEMPTS = 6
 
@@ -123,25 +187,6 @@ const KEYBOARD_ROWS=[
   ['A','S','D','F','G','H','J','K','L'],
   ['INVIO','Z','X','C','V','B','N','M','⌫'],
 ]
-
-// ── FlagCanvas ────────────────────────────────────────────────────────────────
-
-function FlagCanvas({targetCode, mask, isDark, width=280, height=187}) {
-  const ref = useRef(null)
-  useEffect(()=>{ drawFlag(ref.current, targetCode, mask, isDark) }, [targetCode, mask, isDark])
-  const {revealed, total} = countRevealed(targetCode, mask)
-  const pct = Math.round(revealed/total*100)
-  return (
-    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
-      <canvas ref={ref} width={width} height={height}
-        style={{borderRadius:6,border:'2px solid rgba(255,255,255,0.12)',display:'block'}}/>
-      <div style={{width,height:3,background:'rgba(255,255,255,0.1)',borderRadius:2,overflow:'hidden'}}>
-        <div style={{height:'100%',width:`${pct}%`,background:'#538d4e',transition:'width 0.4s',borderRadius:2}}/>
-      </div>
-      <div style={{fontSize:10,color:'rgba(255,255,255,0.35)'}}>{pct}% rivelato</div>
-    </div>
-  )
-}
 
 // ── GameBoard ─────────────────────────────────────────────────────────────────
 
@@ -208,15 +253,11 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
     setInput(v=>v+k.toLowerCase());inputRef.current?.focus()
   }
 
-  // Maschera corrente
-  const revealMask = game.done
-    ? new Uint8Array(PW*PH).fill(1) // tutto visibile
-    : computeRevealMask(country.code, game.guesses)
+  const revealMask = computeRevealMask(country.code, game.guesses)
 
   return (
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',width:'100%',maxWidth:500,margin:'0 auto',padding:'0 8px'}}>
 
-      {/* Sub-header */}
       <div style={{width:'100%',display:'flex',alignItems:'center',padding:'8px 0',borderBottom:`1px solid ${C.headerBorder}`,marginBottom:10}}>
         {!isToday&&<button onClick={onBack} style={{background:'none',border:'none',cursor:'pointer',color:C.textSecondary,fontSize:20,padding:'0 8px 0 0'}}>←</button>}
         <div style={{flex:1,textAlign:isToday?'center':'left'}}>
@@ -225,22 +266,17 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
         </div>
       </div>
 
-      {/* Bandiera */}
       <div style={{animation:shake?'shake 0.5s':'none',marginBottom:6}}>
-        <FlagCanvas targetCode={country.code} mask={revealMask} isDark={isDark} width={280} height={187}/>
+        <FlagCanvas targetCode={country.code} mask={revealMask} isDark={isDark} done={game.done} width={300} height={200}/>
         <div style={{fontSize:11,color:C.textMuted,textAlign:'center',marginTop:4}}>
-          {game.done
-            ?(game.won?`✓ ${country.name}`:`Risposta: ${country.name}`)
-            :game.guesses.length===0?'Scrivi un paese per iniziare':''}
+          {game.done?(game.won?`✓ ${country.name}`:`Risposta: ${country.name}`):game.guesses.length===0?'Scrivi un paese per rivelare la bandiera':''}
         </div>
       </div>
 
-      {/* Tentativi */}
       <div style={{width:'100%',display:'flex',flexDirection:'column',gap:4,marginBottom:6}}>
         {Array.from({length:MAX_ATTEMPTS},(_,i)=>{
           const g=game.guesses[i]
           const isCorrect=g&&g.code===country.code
-          // Pixel rivelati da questo tentativo (solo nuovi)
           let newPx=0
           if(g&&!isCorrect){
             const prevMask=computeRevealMask(country.code,game.guesses.slice(0,i))
@@ -261,8 +297,8 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
                 {g?g.name:''}
               </div>
               {g&&!isCorrect&&(
-                <div style={{flexShrink:0,minWidth:52,textAlign:'right'}}>
-                  <span style={{fontSize:11,fontWeight:700,color:newPx>50?C.accent:newPx>0?C.textSecondary:C.textMuted}}>
+                <div style={{flexShrink:0,minWidth:56,textAlign:'right'}}>
+                  <span style={{fontSize:11,fontWeight:700,color:newPx>200?C.accent:newPx>0?C.textSecondary:C.textMuted}}>
                     {newPx>0?`+${newPx}px`:'nessuno'}
                   </span>
                 </div>
@@ -273,12 +309,10 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
         })}
       </div>
 
-      {/* Counter */}
       <div style={{fontSize:11,color:C.textSecondary,marginBottom:6}}>
         {game.done?(game.won?`Indovinato in ${game.guesses.length}/${MAX_ATTEMPTS}`:'Fine tentativi'):`${game.guesses.length}/${MAX_ATTEMPTS}`}
       </div>
 
-      {/* Input */}
       {!game.done&&(
         <div style={{position:'relative',width:'100%',maxWidth:380,marginBottom:8}}>
           <input ref={inputRef} type="text" value={input}
@@ -305,7 +339,6 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
         </div>
       )}
 
-      {/* Result */}
       {game.done&&showResult&&(
         <div style={{width:'100%',maxWidth:380,background:C.resultBg,border:`1px solid ${C.headerBorder}`,borderRadius:8,padding:'14px',textAlign:'center',marginBottom:8}}>
           <div style={{fontSize:18,fontWeight:700,marginBottom:6}}>{game.won?'🎉 Indovinato!':'Fine tentativi'}</div>
@@ -325,7 +358,6 @@ function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
         </div>
       )}
 
-      {/* Tastiera */}
       <div style={{width:'100%',maxWidth:480}}>
         {KEYBOARD_ROWS.map((row,ri)=>(
           <div key={ri} style={{display:'flex',justifyContent:'center',gap:4,marginBottom:4}}>
@@ -471,8 +503,8 @@ export default function App() {
           <div style={{display:'flex',flexDirection:'column',gap:12,fontSize:14,color:C.textSecondary,lineHeight:1.7}}>
             {[
               ['🎨 Obiettivo',`Indovina la bandiera nascosta! Ogni tentativo rivela i pixel sovrapposti. Hai ${MAX_ATTEMPTS} tentativi.`],
-              ['🔍 Come funziona','La bandiera parte completamente nascosta. Scrivi un paese: i pixel della bandiera da indovinare che hanno lo stesso colore nella stessa posizione della bandiera che hai tentato diventano visibili.'],
-              ['🧩 Strategia','Se vedi una zona rossa in alto a sinistra, cerchi bandiere con rosso in quella posizione. Più tentativi fai, più la bandiera si svela. Cerca paesi con molti colori diversi per rivelare più zone.'],
+              ['🔍 Come funziona','La bandiera parte completamente nascosta. Scrivi un paese: i pixel che hanno lo stesso colore nella stessa posizione diventano visibili. La bandiera si rivela pezzo per pezzo.'],
+              ['🧩 Strategia','Inizia con paesi che hanno molti colori diversi e ben distribuiti (Brasile, Sudafrica, USA) per rivelare più zone possibili. Poi usa i colori visibili per capire di che paese si tratta.'],
               ['🗓 Archivio','Trovi le bandiere dei giorni precedenti, tutte giocabili. Ogni giorno se ne aggiunge una nuova.'],
               ['⏱️ Daily','Nuova bandiera ogni giorno a mezzanotte. I progressi si salvano nel browser.'],
             ].map(([title,text])=>(
@@ -491,4 +523,3 @@ export default function App() {
     </div>
   )
 }
-
