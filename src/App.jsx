@@ -1,9 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import COUNTRIES from './countries.js'
 import FLAG_PIXELS, { FLAG_META } from './flagPixels.js'
 
-const { w: PW, h: PH, colorHex: COLOR_HEX } = FLAG_META
-// COLOR_HEX: 0=bianco 1=nero 2=grigio 3=rosso 4=arancione 5=giallo 6=verde 7=celeste 8=blu 9=viola
+const { w: PW, h: PH } = FLAG_META
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -27,8 +26,8 @@ function formatDate(dateStr) {
 }
 function getTimeToMidnight() {
   const now = new Date(), midnight = new Date(now); midnight.setHours(24,0,0,0)
-  const diff = midnight - now
-  const h=Math.floor(diff/3600000), m=Math.floor((diff%3600000)/60000), s=Math.floor((diff%60000)/1000)
+  const diff = midnight-now
+  const h=Math.floor(diff/3600000),m=Math.floor((diff%3600000)/60000),s=Math.floor((diff%60000)/1000)
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
 }
 function getArchiveDates() {
@@ -37,202 +36,182 @@ function getArchiveDates() {
 
 // ── pixel logic ───────────────────────────────────────────────────────────────
 
-// Decodifica base64 -> Uint8Array
-function b64ToU8(b64) {
-  const bin = atob(b64)
-  const arr = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
+// Decodifica base64 → Uint8Array
+function b64(s) {
+  const bin = atob(s), arr = new Uint8Array(bin.length)
+  for (let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i)
   return arr
 }
 
-// Ritorna Set di color-index presenti in una bandiera
-function getFlagColorSet(code) {
-  const fd = FLAG_PIXELS[code]
-  if (!fd) return new Set()
-  const colors = b64ToU8(fd.c)
-  const set = new Set()
-  for (let i = 0; i < colors.length; i++) {
-    if (colors[i] !== 255) set.add(colors[i])
+// Calcola la maschera di pixel visibili: un pixel è visibile se
+// il suo bucket colore nella bandiera TARGET coincide con il bucket
+// dello stesso pixel nella bandiera GUESS
+function computeOverlapMask(targetCode, guessCode) {
+  const td = FLAG_PIXELS[targetCode]
+  const gd = FLAG_PIXELS[guessCode]
+  if (!td || !gd) return new Uint8Array(PW*PH)
+  const tb = td.b, gb = gd.b
+  const mask = new Uint8Array(PW*PH)
+  for (let i=0;i<PW*PH;i++) {
+    if (tb[i]==='T'||gb[i]==='T') continue
+    if (tb[i]===gb[i]) mask[i]=1
   }
-  return set
+  return mask
 }
 
-// Calcola Set unione di tutti i colori sbloccati dai tentativi
-function getUnlockedColors(guesses) {
-  const unlocked = new Set()
+// Unione delle maschere di tutti i tentativi
+function computeRevealMask(targetCode, guesses) {
+  const size = PW*PH
+  const mask = new Uint8Array(size)
   guesses.forEach(g => {
-    const cs = getFlagColorSet(g.code)
-    cs.forEach(c => unlocked.add(c))
+    const m = computeOverlapMask(targetCode, g.code)
+    for (let i=0;i<size;i++) if (m[i]) mask[i]=1
   })
-  return unlocked
+  return mask
 }
 
-// Disegna la bandiera target sul canvas, mostrando solo pixel con colore in unlocked
-function drawFlag(canvas, targetCode, unlockedColors, isDark) {
+// Conta pixel rivelati vs totali non-trasparenti
+function countRevealed(targetCode, mask) {
+  const td = FLAG_PIXELS[targetCode]
+  if (!td) return {revealed:0, total:1}
+  let revealed=0, total=0
+  const tb = td.b
+  for (let i=0;i<tb.length;i++) {
+    if (tb[i]==='T') continue
+    total++
+    if (mask[i]) revealed++
+  }
+  return {revealed, total}
+}
+
+// ── canvas drawing ────────────────────────────────────────────────────────────
+
+function drawFlag(canvas, targetCode, mask, isDark) {
   if (!canvas) return
   const ctx = canvas.getContext('2d')
   const fd = FLAG_PIXELS[targetCode]
   if (!fd) return
-
-  const cw = canvas.width, ch = canvas.height
-  const scaleX = cw / PW, scaleY = ch / PH
-
-  const colors = b64ToU8(fd.c)
-  const rgb = b64ToU8(fd.p)
-
-  ctx.clearRect(0, 0, cw, ch)
-
-  // Sfondo
-  ctx.fillStyle = isDark ? '#1a1a1a' : '#e0e0e0'
-  ctx.fillRect(0, 0, cw, ch)
-
-  // Disegna pixel visibili
-  for (let y = 0; y < PH; y++) {
-    for (let x = 0; x < PW; x++) {
-      const i = y * PW + x
-      const colorIdx = colors[i]
-      if (colorIdx === 255) continue // trasparente
-      if (!unlockedColors.has(colorIdx)) continue // non sbloccato
-
-      const r = rgb[i*3], g = rgb[i*3+1], b = rgb[i*3+2]
-      ctx.fillStyle = `rgb(${r},${g},${b})`
-      ctx.fillRect(
-        Math.floor(x * scaleX),
-        Math.floor(y * scaleY),
-        Math.ceil(scaleX),
-        Math.ceil(scaleY)
-      )
+  const cw=canvas.width, ch=canvas.height
+  const scaleX=cw/PW, scaleY=ch/PH
+  ctx.clearRect(0,0,cw,ch)
+  ctx.fillStyle = isDark ? '#1a1a1a' : '#d0d0d0'
+  ctx.fillRect(0,0,cw,ch)
+  const rgb = b64(fd.p)
+  for (let y=0;y<PH;y++) {
+    for (let x=0;x<PW;x++) {
+      const i=y*PW+x
+      if (!mask[i]) continue
+      const r=rgb[i*3],g=rgb[i*3+1],b=rgb[i*3+2]
+      ctx.fillStyle=`rgb(${r},${g},${b})`
+      ctx.fillRect(Math.floor(x*scaleX),Math.floor(y*scaleY),Math.ceil(scaleX),Math.ceil(scaleY))
     }
   }
 }
 
 // ── storage ───────────────────────────────────────────────────────────────────
 
-const STORAGE_PREFIX = 'flagle3_'
+const STORAGE_PREFIX = 'flagle4_'
 const THEME_KEY = 'flagle_theme'
 const MAX_ATTEMPTS = 6
 
-function loadGame(dateStr) { try { return JSON.parse(localStorage.getItem(STORAGE_PREFIX+dateStr))||null } catch { return null } }
-function saveGame(dateStr, g) { try { localStorage.setItem(STORAGE_PREFIX+dateStr, JSON.stringify(g)) } catch {} }
-function initGame(dateStr) { return loadGame(dateStr)||{guesses:[],done:false,won:false} }
+function loadGame(dateStr){try{return JSON.parse(localStorage.getItem(STORAGE_PREFIX+dateStr))||null}catch{return null}}
+function saveGame(dateStr,g){try{localStorage.setItem(STORAGE_PREFIX+dateStr,JSON.stringify(g))}catch{}}
+function initGame(dateStr){return loadGame(dateStr)||{guesses:[],done:false,won:false}}
 
-const KEYBOARD_ROWS = [
+const KEYBOARD_ROWS=[
   ['Q','W','E','R','T','Y','U','I','O','P'],
   ['A','S','D','F','G','H','J','K','L'],
   ['INVIO','Z','X','C','V','B','N','M','⌫'],
 ]
 
-// ── FlagCanvas component ──────────────────────────────────────────────────────
+// ── FlagCanvas ────────────────────────────────────────────────────────────────
 
-function FlagCanvas({ targetCode, unlockedColors, isDark, width=280, height=187 }) {
-  const canvasRef = useRef(null)
-
-  useEffect(() => {
-    drawFlag(canvasRef.current, targetCode, unlockedColors, isDark)
-  }, [targetCode, unlockedColors, isDark])
-
-  const totalPixels = PW * PH
-  const fd = FLAG_PIXELS[targetCode]
-  let visiblePixels = 0
-  if (fd) {
-    const colors = b64ToU8(fd.c)
-    for (let i = 0; i < colors.length; i++) {
-      if (colors[i] !== 255 && unlockedColors.has(colors[i])) visiblePixels++
-    }
-  }
-  const pct = fd ? Math.round(visiblePixels / totalPixels * 100) : 0
-
+function FlagCanvas({targetCode, mask, isDark, width=280, height=187}) {
+  const ref = useRef(null)
+  useEffect(()=>{ drawFlag(ref.current, targetCode, mask, isDark) }, [targetCode, mask, isDark])
+  const {revealed, total} = countRevealed(targetCode, mask)
+  const pct = Math.round(revealed/total*100)
   return (
-    <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
-      <canvas
-        ref={canvasRef}
-        width={width}
-        height={height}
-        style={{ borderRadius:6, border:'2px solid rgba(255,255,255,0.12)', display:'block' }}
-      />
-      {/* Barra progresso */}
-      <div style={{ width, height:3, background:'rgba(255,255,255,0.1)', borderRadius:2, overflow:'hidden' }}>
-        <div style={{ height:'100%', width:`${pct}%`, background:'#538d4e', transition:'width 0.4s', borderRadius:2 }} />
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:4}}>
+      <canvas ref={ref} width={width} height={height}
+        style={{borderRadius:6,border:'2px solid rgba(255,255,255,0.12)',display:'block'}}/>
+      <div style={{width,height:3,background:'rgba(255,255,255,0.1)',borderRadius:2,overflow:'hidden'}}>
+        <div style={{height:'100%',width:`${pct}%`,background:'#538d4e',transition:'width 0.4s',borderRadius:2}}/>
       </div>
-      <div style={{ fontSize:10, color:'rgba(255,255,255,0.4)' }}>{pct}% rivelato</div>
+      <div style={{fontSize:10,color:'rgba(255,255,255,0.35)'}}>{pct}% rivelato</div>
     </div>
   )
 }
 
 // ── GameBoard ─────────────────────────────────────────────────────────────────
 
-function GameBoard({ dateStr, onBack, isDark, C, isToday, countdown }) {
+function GameBoard({dateStr, onBack, isDark, C, isToday, countdown}) {
   const country = getDailyCountry(dateStr)
-  const [game, setGame] = useState(() => initGame(dateStr))
+  const [game, setGame] = useState(()=>initGame(dateStr))
   const [input, setInput] = useState('')
   const [suggestions, setSuggestions] = useState([])
   const [activeSug, setActiveSug] = useState(-1)
   const [shake, setShake] = useState(false)
-  const [showResult, setShowResult] = useState(() => !!loadGame(dateStr)?.done)
+  const [showResult, setShowResult] = useState(()=>!!loadGame(dateStr)?.done)
   const inputRef = useRef(null)
   const acRef = useRef(null)
 
-  useEffect(() => { saveGame(dateStr, game) }, [game])
+  useEffect(()=>{saveGame(dateStr,game)},[game])
 
-  useEffect(() => {
-    const val = input.trim().toLowerCase()
-    if (!val) { setSuggestions([]); return }
-    setSuggestions(COUNTRIES.filter(c => c.name.toLowerCase().startsWith(val)||c.name.toLowerCase().includes(val)).slice(0,6))
+  useEffect(()=>{
+    const val=input.trim().toLowerCase()
+    if(!val){setSuggestions([]);return}
+    setSuggestions(COUNTRIES.filter(c=>c.name.toLowerCase().startsWith(val)||c.name.toLowerCase().includes(val)).slice(0,6))
     setActiveSug(-1)
-  }, [input])
+  },[input])
 
-  useEffect(() => {
-    const h = e => { if (acRef.current&&!acRef.current.contains(e.target)&&e.target!==inputRef.current) setSuggestions([]) }
-    document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h)
-  }, [])
+  useEffect(()=>{
+    const h=e=>{if(acRef.current&&!acRef.current.contains(e.target)&&e.target!==inputRef.current)setSuggestions([])}
+    document.addEventListener('mousedown',h); return()=>document.removeEventListener('mousedown',h)
+  },[])
 
-  useEffect(() => {
-    const h = e => {
-      if (game.done) return
-      if (e.key==='Enter') { e.preventDefault(); handleConfirm(); return }
-      if (e.key==='Backspace') { setInput(v=>v.slice(0,-1)); return }
-      if (e.key==='Escape') { setSuggestions([]); return }
-      if (e.key==='ArrowDown') { e.preventDefault(); setActiveSug(i=>Math.min(i+1,suggestions.length-1)); return }
-      if (e.key==='ArrowUp') { e.preventDefault(); setActiveSug(i=>Math.max(i-1,0)); return }
+  useEffect(()=>{
+    const h=e=>{
+      if(game.done)return
+      if(e.key==='Enter'){e.preventDefault();handleConfirm();return}
+      if(e.key==='Backspace'){setInput(v=>v.slice(0,-1));return}
+      if(e.key==='Escape'){setSuggestions([]);return}
+      if(e.key==='ArrowDown'){e.preventDefault();setActiveSug(i=>Math.min(i+1,suggestions.length-1));return}
+      if(e.key==='ArrowUp'){e.preventDefault();setActiveSug(i=>Math.max(i-1,0));return}
     }
-    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
-  }, [game.done, suggestions, activeSug, input])
+    window.addEventListener('keydown',h); return()=>window.removeEventListener('keydown',h)
+  },[game.done,suggestions,activeSug,input])
 
   function submitGuess(c) {
-    if (game.done) return
-    if (game.guesses.find(g=>g.code===c.code)) { setShake(true); setTimeout(()=>setShake(false),500); return }
-    const won = c.code===country.code
-    const newGuesses = [...game.guesses, {name:c.name, code:c.code}]
-    const done = won||newGuesses.length>=MAX_ATTEMPTS
+    if(game.done)return
+    if(game.guesses.find(g=>g.code===c.code)){setShake(true);setTimeout(()=>setShake(false),500);return}
+    const won=c.code===country.code
+    const newGuesses=[...game.guesses,{name:c.name,code:c.code}]
+    const done=won||newGuesses.length>=MAX_ATTEMPTS
     setGame(g=>({...g,guesses:newGuesses,done,won}))
-    setInput(''); setSuggestions([]); setActiveSug(-1)
-    if (done) setTimeout(()=>setShowResult(true),800)
+    setInput('');setSuggestions([]);setActiveSug(-1)
+    if(done)setTimeout(()=>setShowResult(true),800)
   }
 
   function handleConfirm() {
-    if (activeSug>=0&&suggestions[activeSug]) { submitGuess(suggestions[activeSug]); return }
-    if (suggestions.length===1) { submitGuess(suggestions[0]); return }
-    const exact = COUNTRIES.find(c=>c.name.toLowerCase()===input.trim().toLowerCase())
-    if (exact) submitGuess(exact)
-    else { setShake(true); setTimeout(()=>setShake(false),500) }
+    if(activeSug>=0&&suggestions[activeSug]){submitGuess(suggestions[activeSug]);return}
+    if(suggestions.length===1){submitGuess(suggestions[0]);return}
+    const exact=COUNTRIES.find(c=>c.name.toLowerCase()===input.trim().toLowerCase())
+    if(exact)submitGuess(exact)
+    else{setShake(true);setTimeout(()=>setShake(false),500)}
   }
 
   function handleKey(k) {
-    if (game.done) return
-    if (k==='⌫') { setInput(v=>v.slice(0,-1)); return }
-    if (k==='INVIO') { handleConfirm(); return }
-    setInput(v=>v+k.toLowerCase()); inputRef.current?.focus()
+    if(game.done)return
+    if(k==='⌫'){setInput(v=>v.slice(0,-1));return}
+    if(k==='INVIO'){handleConfirm();return}
+    setInput(v=>v+k.toLowerCase());inputRef.current?.focus()
   }
 
-  const unlockedColors = getUnlockedColors(game.guesses)
-  // Se vinto/perso mostra tutto
-  const displayColors = game.done
-    ? new Set([0,1,2,3,4,5,6,7,8,9])
-    : unlockedColors
-
-  // Colori sbloccati dall'ultimo tentativo
-  const prevColors = game.guesses.length > 1 ? getUnlockedColors(game.guesses.slice(0,-1)) : new Set()
-  const newColors = [...unlockedColors].filter(c=>!prevColors.has(c))
+  // Maschera corrente
+  const revealMask = game.done
+    ? new Uint8Array(PW*PH).fill(1) // tutto visibile
+    : computeRevealMask(country.code, game.guesses)
 
   return (
     <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',width:'100%',maxWidth:500,margin:'0 auto',padding:'0 8px'}}>
@@ -246,65 +225,46 @@ function GameBoard({ dateStr, onBack, isDark, C, isToday, countdown }) {
         </div>
       </div>
 
-      {/* Bandiera canvas */}
-      <div style={{animation:shake?'shake 0.5s':'none', marginBottom:8}}>
-        <FlagCanvas
-          targetCode={country.code}
-          unlockedColors={displayColors}
-          isDark={isDark}
-          width={280}
-          height={187}
-        />
+      {/* Bandiera */}
+      <div style={{animation:shake?'shake 0.5s':'none',marginBottom:6}}>
+        <FlagCanvas targetCode={country.code} mask={revealMask} isDark={isDark} width={280} height={187}/>
         <div style={{fontSize:11,color:C.textMuted,textAlign:'center',marginTop:4}}>
           {game.done
-            ? (game.won ? `✓ ${country.name}` : `Risposta: ${country.name}`)
-            : unlockedColors.size===0
-              ? 'Scrivi un paese per iniziare a rivelare la bandiera'
-              : `${unlockedColors.size} colori sbloccati`}
+            ?(game.won?`✓ ${country.name}`:`Risposta: ${country.name}`)
+            :game.guesses.length===0?'Scrivi un paese per iniziare':''}
         </div>
       </div>
 
       {/* Tentativi */}
       <div style={{width:'100%',display:'flex',flexDirection:'column',gap:4,marginBottom:6}}>
         {Array.from({length:MAX_ATTEMPTS},(_,i)=>{
-          const g = game.guesses[i]
-          const isCorrect = g&&g.code===country.code
-          // Colori nuovi aggiunti da questo tentativo
-          const prevC = i>0 ? getUnlockedColors(game.guesses.slice(0,i)) : new Set()
-          const thisC = g ? getUnlockedColors(game.guesses.slice(0,i+1)) : new Set()
-          const addedColors = g ? [...thisC].filter(c=>!prevC.has(c)) : []
-
-          return (
+          const g=game.guesses[i]
+          const isCorrect=g&&g.code===country.code
+          // Pixel rivelati da questo tentativo (solo nuovi)
+          let newPx=0
+          if(g&&!isCorrect){
+            const prevMask=computeRevealMask(country.code,game.guesses.slice(0,i))
+            const thisMask=computeOverlapMask(country.code,g.code)
+            for(let j=0;j<thisMask.length;j++) if(thisMask[j]&&!prevMask[j]) newPx++
+          }
+          return(
             <div key={i} style={{display:'flex',alignItems:'center',gap:6}}>
               <div style={{width:14,fontSize:10,color:C.textMuted,textAlign:'right',flexShrink:0}}>{i+1}</div>
-
-              {/* Flag tentativo */}
-              {g ? (
+              {g?(
                 <div style={{width:48,height:32,borderRadius:3,flexShrink:0,overflow:'hidden',border:`2px solid ${isCorrect?C.cellCorrect:C.cellWrong}`}}>
                   <span className={`fi fi-${g.code}`} style={{width:'100%',height:'100%',backgroundSize:'cover',backgroundPosition:'center',display:'block'}}/>
                 </div>
-              ) : (
+              ):(
                 <div style={{width:48,height:32,borderRadius:3,flexShrink:0,border:`2px solid ${C.cellEmptyBorder}`,background:C.cellEmpty}}/>
               )}
-
-              {/* Nome */}
               <div style={{flex:1,height:32,borderRadius:3,border:`2px solid ${g?(isCorrect?C.cellCorrect:C.cellWrong):C.cellEmptyBorder}`,background:g?(isCorrect?C.cellCorrect:C.cellWrong):C.cellEmpty,display:'flex',alignItems:'center',paddingLeft:8,fontSize:12,fontWeight:600,color:g?'#fff':C.textMuted}}>
                 {g?g.name:''}
               </div>
-
-              {/* Colori sbloccati */}
               {g&&!isCorrect&&(
-                <div style={{display:'flex',gap:3,flexShrink:0,alignItems:'center',minWidth:60,justifyContent:'flex-end'}}>
-                  {addedColors.length > 0 ? (
-                    <>
-                      <span style={{fontSize:10,color:C.textMuted,marginRight:2}}>+</span>
-                      {addedColors.map(ci=>(
-                        <div key={ci} style={{width:12,height:12,borderRadius:2,background:COLOR_HEX[ci]||'#888',border:'1px solid rgba(255,255,255,0.2)',flexShrink:0}} title={['bianco','nero','grigio','rosso','arancione','giallo','verde','celeste','blu','viola'][ci]}/>
-                      ))}
-                    </>
-                  ) : (
-                    <span style={{fontSize:10,color:C.textMuted}}>nessuno</span>
-                  )}
+                <div style={{flexShrink:0,minWidth:52,textAlign:'right'}}>
+                  <span style={{fontSize:11,fontWeight:700,color:newPx>50?C.accent:newPx>0?C.textSecondary:C.textMuted}}>
+                    {newPx>0?`+${newPx}px`:'nessuno'}
+                  </span>
                 </div>
               )}
               {g&&isCorrect&&<span style={{fontSize:16,marginLeft:4}}>✓</span>}
@@ -361,9 +321,7 @@ function GameBoard({ dateStr, onBack, isDark, C, isToday, countdown }) {
               <div style={{fontSize:22,fontWeight:700,fontFamily:'monospace',letterSpacing:3,marginTop:2,color:C.text}}>{countdown}</div>
             </>
           )}
-          {!isToday&&(
-            <button onClick={onBack} style={{marginTop:8,padding:'7px 16px',background:C.accent,color:'#fff',border:'none',borderRadius:4,fontWeight:700,fontSize:12,cursor:'pointer'}}>← TORNA ALL'ARCHIVIO</button>
-          )}
+          {!isToday&&<button onClick={onBack} style={{marginTop:8,padding:'7px 16px',background:C.accent,color:'#fff',border:'none',borderRadius:4,fontWeight:700,fontSize:12,cursor:'pointer'}}>← TORNA ALL'ARCHIVIO</button>}
         </div>
       )}
 
@@ -390,34 +348,25 @@ export default function App() {
   const todayStr = getTodayStr()
   const [tab, setTab] = useState('game')
   const [archiveDate, setArchiveDate] = useState(null)
-  const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY)||'dark')
+  const [theme, setTheme] = useState(()=>localStorage.getItem(THEME_KEY)||'dark')
   const [,forceUpdate] = useState(0)
   const [countdown, setCountdown] = useState(getTimeToMidnight())
 
-  useEffect(()=>{ localStorage.setItem(THEME_KEY,theme) },[theme])
-  useEffect(()=>{ const id=setInterval(()=>setCountdown(getTimeToMidnight()),1000); return()=>clearInterval(id) },[])
+  useEffect(()=>{localStorage.setItem(THEME_KEY,theme)},[theme])
+  useEffect(()=>{const id=setInterval(()=>setCountdown(getTimeToMidnight()),1000);return()=>clearInterval(id)},[])
 
   const isDark = theme==='dark'
   const C = {
-    pageBg: isDark?'#121213':'#ffffff',
-    headerBorder: isDark?'#3a3a3c':'#d3d6da',
-    text: isDark?'#ffffff':'#1a1a1b',
-    textSecondary: isDark?'#818384':'#787c7e',
-    textMuted: isDark?'#565758':'#aaa',
-    cellEmpty: isDark?'#121213':'#ffffff',
-    cellEmptyBorder: isDark?'#3a3a3c':'#d3d6da',
-    cellCorrect: '#538d4e',
-    cellWrong: isDark?'#3a3a3c':'#787c7e',
-    keyBg: isDark?'#818384':'#d3d6da',
-    keySpecialBg: isDark?'#565758':'#aaa',
-    keyText: '#ffffff',
-    acBg: isDark?'#1e1e1e':'#fff',
-    acBorder: isDark?'#3a3a3c':'#d3d6da',
-    acHover: isDark?'#2a2a2b':'#f0f0f0',
-    inputBg: isDark?'#1e1e1e':'#fff',
-    inputBorder: isDark?'#565758':'#d3d6da',
-    accent: '#538d4e',
-    resultBg: isDark?'#1a1a1b':'#f9f9f9',
+    pageBg:isDark?'#121213':'#ffffff', headerBorder:isDark?'#3a3a3c':'#d3d6da',
+    text:isDark?'#ffffff':'#1a1a1b', textSecondary:isDark?'#818384':'#787c7e',
+    textMuted:isDark?'#565758':'#aaa', cellEmpty:isDark?'#121213':'#ffffff',
+    cellEmptyBorder:isDark?'#3a3a3c':'#d3d6da', cellCorrect:'#538d4e',
+    cellWrong:isDark?'#3a3a3c':'#787c7e', keyBg:isDark?'#818384':'#d3d6da',
+    keySpecialBg:isDark?'#565758':'#aaa', keyText:'#ffffff',
+    acBg:isDark?'#1e1e1e':'#fff', acBorder:isDark?'#3a3a3c':'#d3d6da',
+    acHover:isDark?'#2a2a2b':'#f0f0f0', inputBg:isDark?'#1e1e1e':'#fff',
+    inputBorder:isDark?'#565758':'#d3d6da', accent:'#538d4e',
+    resultBg:isDark?'#1a1a1b':'#f9f9f9',
   }
 
   const archiveDates = getArchiveDates()
@@ -434,12 +383,9 @@ export default function App() {
   return (
     <div style={{minHeight:'100vh',background:C.pageBg,color:C.text,fontFamily:"'Clear Sans','Helvetica Neue',Arial,sans-serif",display:'flex',flexDirection:'column'}}>
 
-      {/* Header */}
       <div style={{borderBottom:`1px solid ${C.headerBorder}`,padding:'0 16px',flexShrink:0}}>
         <div style={{maxWidth:500,margin:'0 auto',display:'flex',alignItems:'center',height:50}}>
-          <div style={{flex:1}}>
-            <button onClick={()=>setTab('howto')} style={{background:'none',border:'none',cursor:'pointer',color:C.text,fontSize:20,padding:'4px 8px 4px 0'}}>?</button>
-          </div>
+          <div style={{flex:1}}><button onClick={()=>setTab('howto')} style={{background:'none',border:'none',cursor:'pointer',color:C.text,fontSize:20,padding:'4px 8px 4px 0'}}>?</button></div>
           <div style={{flex:2,textAlign:'center'}}>
             <div style={{fontSize:17,fontWeight:700,letterSpacing:2,color:C.text}}>🎨 FLAGLE DAILY</div>
             <div style={{fontSize:10,color:'#f5a623',letterSpacing:1}}>{formatDate(todayStr)}</div>
@@ -524,9 +470,9 @@ export default function App() {
           <div style={{fontSize:13,fontWeight:700,letterSpacing:2,textAlign:'center',marginBottom:20,color:C.textSecondary}}>COME SI GIOCA</div>
           <div style={{display:'flex',flexDirection:'column',gap:12,fontSize:14,color:C.textSecondary,lineHeight:1.7}}>
             {[
-              ['🎨 Obiettivo',`Indovina la bandiera nascosta! Ogni tentativo rivela parte dei suoi colori. Hai ${MAX_ATTEMPTS} tentativi.`],
-              ['🔍 Come funziona','La bandiera parte completamente nascosta. Ogni paese che scrivi sblocca i colori che hai in comune con la bandiera da indovinare — i pixel con quei colori diventano visibili.'],
-              ['🧩 Strategia','Inizia con paesi ricchi di colori diversi (Brasile, Sudafrica, Zimbabwe) per rivelare più zone possibili. Poi usa quello che vedi per restringere la ricerca.'],
+              ['🎨 Obiettivo',`Indovina la bandiera nascosta! Ogni tentativo rivela i pixel sovrapposti. Hai ${MAX_ATTEMPTS} tentativi.`],
+              ['🔍 Come funziona','La bandiera parte completamente nascosta. Scrivi un paese: i pixel della bandiera da indovinare che hanno lo stesso colore nella stessa posizione della bandiera che hai tentato diventano visibili.'],
+              ['🧩 Strategia','Se vedi una zona rossa in alto a sinistra, cerchi bandiere con rosso in quella posizione. Più tentativi fai, più la bandiera si svela. Cerca paesi con molti colori diversi per rivelare più zone.'],
               ['🗓 Archivio','Trovi le bandiere dei giorni precedenti, tutte giocabili. Ogni giorno se ne aggiunge una nuova.'],
               ['⏱️ Daily','Nuova bandiera ogni giorno a mezzanotte. I progressi si salvano nel browser.'],
             ].map(([title,text])=>(
